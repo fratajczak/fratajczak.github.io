@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+
+<title>Implementing a shell</title>
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="styles/atom-one-light.css">
+<link rel="stylesheet" href="writ.min.css">
+ <link href="https://fonts.googleapis.com/css2?family=Fira+Mono:wght@500&family=PT+Serif&display=swap" rel="stylesheet">
+<script src="highlight.pack.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+
+<header>
+	<h1>Implementing a shell from scratch in C</h1>
+</header>
+
+<main>
+	<h2>Goals</h2>
+	<ul>
+		<li>Making your own Unix shell like bash, zsh or fish with cool features 
+			such as redirections, pipes or job control using only basic C stdlib 
+			functions and syscalls</li>
+		<li>Learning how the shell you use everyday works internally in order to
+			master it</li>
+		<li>Having fun in the process (hopefully)</li>
+	</ul>
+	<p>
+		This is not meant to be a C tutorial, so I'll assume you have a basic
+		understanding of C, but will try my best to explain the core concepts, 
+		functions and syscalls we'll be using.
+	</p>
+
+	<h2>The basics</h2>
+
+	<h4>What's a shell?</h4>
+	<p>
+		A <b>shell</b> is a program that runs on a terminal and allows you to 
+		easily run and combine commands.
+	</p>
+	<p>
+		A <b>terminal</b> sends keyboard input to a program and displays the 
+		characters it receives on your screen.
+	</p>
+
+
+	<p>
+		A shell runs on an infinite loop with the following basic steps:
+		<ul>
+			<li>Read input from the user, usually one line,</li>
+			<li>Parse the line to see what commands it should run,</li>
+			<li>Run the commands and repeat.</li>
+		</ul>
+	</p>
+
+	<h4>Getting input from the terminal</h4>
+	<p>
+		To read input from the terminal, we will use the <code>read(2)</code>
+		system call.<br>
+		<code>$> man 2 read</code> tells us:
+	</p>
+	<pre><code class="plaintext">
+SYNOPSIS
+	#include &lt;unistd.h>
+
+	ssize_t read(int fd, void *buf, size_t count);
+
+DESCRIPTION
+	read() attempts to read up to count bytes from file descriptor fd into
+	the buffer starting at buf.
+
+RETURN VALUE
+	On success, the number of bytes read is returned (zero  indicates  end
+	of file), and the file position is advanced by this number.
+	</code></pre>
+	<p>
+		<i>(man pages section 2 is dedicated to syscalls)</i>
+	</p>
+	<p>
+		The file descriptor associated to the input from the terminal is
+		number 0, also referred to as standard input or stdin. The terminal
+		output, or stdout, is associated to file descriptor 1.
+	</p>
+	<p>
+		Let's start by making our own crappy version of <code>cat</code>:
+	</p>
+	<pre><code class="C">
+#include &lt;unistd.h>
+
+int main()
+{
+	int ret;
+	char buf[128];
+
+	do {
+		ret = read(STDIN_FILENO, buf, 127);
+		buf[ret + 1] = '\0';
+		write(STDOUT_FILENO, buf, ret);
+	} while (ret > 0);
+}
+	</code></pre>
+	<p>
+		<code>STDIN_FILENO</code> and <code>STDOUT_FILENO</code> are macros
+		defined in <code>unistd.h</code>, they evaluate to 0 and 1 respectively.
+	</p>
+	<p>
+		Note that read does not NULL-terminate buf, so we have to do it
+		ourselves (this is not necessary here, because write only writes as many
+		characters as necessary, but it will be later).
+	</p>
+	<p>
+		If you try compiling and running this program, you'll see it only writes
+		the input after you press enter or Ctrl-D , because <code>read</code> 
+		doesn't return until then (Ctrl-D sends the end of transmission
+		character to your terminal). If you press Ctrl-D on an empty line,
+		<code>read</code> considers it as the end of file and returns 0, so the
+		program exits.
+	</p>
+	<p>
+		As you can see, only using <code>read</code> still gives us some
+		very basic line editing by default. Later on, we'll have to disable this
+		to implement our own advanced line editing, but for now, this will do.
+	</p>
+
+	<h4>Executing commands</h4>
+
+	<h5>1. execv()</h5>
+
+	<p>
+		To execute a command, we'll use <code>execv(2)</code>.
+		Its prototype is <br>
+		<code>int execv(const char *path, char *const argv[]);</code>
+		<ul>
+			<li><code>path</code> is a path to a binary</li>
+			<li><code>argv</code> is a NULL-terminated array of arguments.</li>
+			<li><code>argv[0]</code> is the name that the user used to invoke
+				the command.</li>
+		</ul>
+	</p>
+	<p>
+		If we wanted to execute <code>cat -e /etc/passwd</code>, we would do:
+	</p>
+	<pre><code class="C">
+#include &lt;unistd.h>
+
+int main()
+{
+	char *argv[] = {"cat", "-e", "/etc/passwd", NULL};
+
+	execv("/bin/cat", argv);
+	write(STDOUT_FILENO, "Executed cat!\n", 14);
+}
+	</code></pre>
+	<p>
+		If you try executing this program, you will see that it executes cat,
+		but the "Executed cat!" message does not appear. Why does this happen?
+		As is often the case, the answer lies within the man pages:
+	</p>
+	<pre><code class="plaintext">
+DESCRIPTION
+	The exec() family of functions replaces the current process image with a
+	new process image.
+	</code></pre>
+	<p>
+		This means our program is completely replaced by cat, which makes our
+		would-be shell a bit useless.
+	</p>
+
+	<h5>2. fork()</h5>
+	<p>
+		The solution to this problem is yet another syscall, <code>fork(2)</code>.
+	</p>
+	<pre><code class="plaintext">
+NAME
+	fork - create a child process
+
+SYNOPSIS
+	#include &lt;sys/types.h>
+	#include &lt;unistd.h>
+
+	pid_t fork(void);
+
+DESCRIPTION
+	fork()  creates  a new process by duplicating the calling process.  The
+	new process is referred to as the child process.  The  calling  process
+	is referred to as the parent process.
+	</code></pre>
+	<p>
+		The child process created is an exact duplicate of the parent process.
+		It has the same variables, open file descriptors and starts at the same
+		point in execution as the parent process when it called fork. However,
+		if you modify a variable in the child or parent process after forking,
+		no changes are applied to the other process.
+	</p>
+	<p>
+		Fork returns the process id (or pid) of the child process if we are in 
+		the parent process, but if we are in the child process, it returns 0.
+		This can be used to execute a bit of code only in the fork.
+	</p>
+	<p>
+		We then just need to fork a new process before calling <code>execv</code>,
+		our code becomes:
+	</p>
+	<pre><code class="C">
+#include &lt;unistd.h>
+#include &lt;sys/types.h>
+
+int main()
+{
+	int pid;
+	char *argv[] = {"cat", "-e", "/etc/passwd", NULL};
+
+	pid = fork();
+	if (pid == 0) {
+		execv("/bin/cat", argv);
+	}
+	write(STDOUT_FILENO, "Executed cat!\n", 14);
+}
+	</code></pre>
+	<p>
+		One last problem remains: even though our <code>write()</code> is after
+		the <code>execve</code> in the code, we get this output:
+	</p>
+	<pre><code>
+Executed cat!
+root:x:0:0::/root:/bin/bash$
+bin:x:1:1::/:/usr/bin/nologin$
+daemon:x:2:2::/:/usr/bin/nologin$
+[...]
+	</code></pre>
+	<p>
+		That's because the parent process just goes past the if condition
+		(which is only true in the child process), and continues its execution
+		without waiting for the child process to finish.
+	</p>
+
+	<h5>3. wait()</h5>
+
+	<p>
+		In order to wait for the child process to finish before resuming 
+		execution in the parent process, we'll use the aptly-named
+		<code>wait(2)</code> syscall.<br>
+		<code>wait</code> takes an <code>int *</code> as argument, in which
+		it stores information about the first child process that changed status,
+		and returns this child process' pid. <br>
+	</p>
+	<p>
+		Since we don't need any information for now, we'll juste use
+		<code>wait(NULL);</code>, which will still wait for a child process, but
+		won't give us any information about it other than its pid.
+	</p>
+	<pre><code class="C">
+#include &lt;unistd.h>
+#include &lt;sys/types.h>
+#include &lt;sys/wait.h>
+
+int main()
+{
+	int pid;
+	char *argv[] = {"cat", "-e", "/etc/passwd", NULL};
+
+	pid = fork();
+	if (pid == 0) {
+		execv("/bin/cat", argv);
+	}
+	wait(NULL);
+	write(STDOUT_FILENO, "Executed cat!\n", 14);
+}
+	</code></pre>
+	<p>
+		It finally works like we wanted it to! Now we just need to combine
+		everything we learned and we'll have a working shell.
+	</p>
+
+	<h4>Putting it all together</h4>
+
+	<p>
+		We'll just need to get input from the user, split the command line into
+		an array of strings (argv) using <code>strtok(3)</code>, execute it,
+		and loop. Keep in mind we'll have to execute commands by typing in their
+		full path for now, e.g <code>/usr/bin/cat test</code>, not
+		<code>cat test</code>.<br>
+		You can try doing this yourself first, but if you're stuck, here's a 
+		solution:
+	</p>
+	<pre><code class="C">
+//read, fork, write, execv
+#include &lt;unistd.h>
+//fork
+#include &lt;sys/types.h>
+//wait
+#include &lt;sys/wait.h>
+//perror
+#include &lt;stdio.h>
+//malloc
+#include &lt;stdlib.h>
+//strtok
+#include &lt;string.h>
+
+char **get_argv(char *input)
+{
+	char **argv = NULL;
+	char *token;
+	size_t word_count = 0;
+	size_t i = 0;
+
+	while (input[i] == ' '){
+		i++;
+	}
+
+	while (input[i]) {
+		if (input[i] == ' ' || input[i] == '\n'){
+			word_count++;
+			while (input[i] == ' ' || input[i] == '\n'){
+				i++;
+			}
+		}
+		i++;
+	}
+	if (word_count == 0){
+		return NULL;
+	}
+
+	argv = malloc(sizeof(char *) * (word_count + 1));
+	if (argv) {
+		token = strtok(input, " \n");
+		i = 0;
+		while (token) {
+			argv[i] = token;
+			token = strtok(NULL, " \n");
+			i++;
+		}
+	}
+	return argv;
+}
+
+int main()
+{
+	int pid;
+	int ret;
+	char buf[128];
+	char **argv;
+
+	do {
+		write(STDOUT_FILENO, "$> ", 3); //write a prompt
+		ret = read(STDIN_FILENO, buf, 127);
+		buf[ret + 1] = '\0';
+		argv = get_argv(buf);
+		if (argv) {
+			pid = fork();
+			if (pid == 0) {
+				execv(argv[0], argv);
+				perror(argv[0]);
+			}
+			wait(NULL);
+		}
+	} while (ret > 0);
+}
+	</code></pre>
+	<p>
+		Note that: 
+	</p>
+	<pre><code class="C">
+execv(argv[0], argv);
+perror(argv[0]);
+	</code></pre>
+	<p>
+		is equivalent to:
+	</p>
+	<pre><code class="C">
+if (execv(argv[0], argv) == -1) //check if execv failed
+	perror(argv[0]);
+	</code></pre>
+	<p>
+		Because if <code>execv</code> succeeds, the process is no longer our
+		shell and <code>perror</code> will never be executed.
+	</p>
+	<p>
+		We finally have something that kind of looks like a shell. Next up,
+		environment variables and <code>$PATH</code>!
+	</p>
+</main>
