@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+
+<title>ChessDiagramOCR</title>
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="styles/atom-one-light.css">
+<link rel="stylesheet" href="../writ.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Mono:wght@500&family=PT+Serif&display=swap" rel="stylesheet">
+<script src="highlight.pack.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+
+<header>
+	<h1>Recognizing chess diagrams with OpenCV</h1>
+</header>
+
+<main>
+	<p>This is a description of <a href="https://github.com/fratajczak/ChessDiagramOCR">ChessDiagramOCR</a>,
+	a program I wrote in C++ using OpenCV for image recognition.</p>
+	<p>
+	The goal is to recognize positions depicted on pictures of chess diagrams such as the one pictured below,
+	in order to easily analyze it with a website such as <a href="https://lichess.org">lichess</a>. It has
+	a really great analysis board, a clean interface and is completely free and open source, I highly recommend 
+	you to try it out if you have an interest in chess.
+	</p>
+	<br>
+	<img style="display:block;margin-left:auto;margin-right:auto;" src=diagram1.jpg class="center">
+	<p>
+	</p>
+	<h2>Partitionning the board</h2>
+	<p>
+	The logic for this step is in <a href="https://github.com/fratajczak/ChessDiagramOCR/blob/master/src/partition.cpp">partition.cpp</a>.
+	</p>
+	<p>
+	We need to divide the input image into the 64 squares of the chess board. To do this, we will detect the lines
+	in the image using a standard Hough transform.
+	</p>
+	<p>
+	First, we read the image, convert it to grayscale and resize it to 512x512px. We blur it using a gaussian kernel
+	of size 7 to get smoother lines, and apply Canny edge detection:
+	</p>
+	<br>
+	<img style="display:block;margin-left:auto;margin-right:auto;" src=diagram2.jpg class="center">
+	<p>
+	Then we look for the lines in the preprocessed image using a Hough transform, progressively reducing the threshold
+	until we get 9 horizontal and 9 vertical lines ( <code>findBoardLines</code> ). If two lines are too close to each other,
+	we keep the one whose angle is the closest to the average angle of all lines ( <code>removeDuplicateLines</code> ). 
+	</p>
+	<p>
+	After this, we compute the intersections between the vertical and horizontal lines to get the coordinates
+	of every square on the board:
+	</p>
+	<br>
+
+	<img style="display:block;margin-left:auto;margin-right:auto;" src=diagram3.jpg class="center">
+
+
+	<h2>Normalizing piece images</h2>
+	<p>
+	The logic for this step is in <a href="https://github.com/fratajczak/ChessDiagramOCR/blob/master/src/normalize.cpp">normalize.cpp</a>.
+	</p>
+	<p>
+	Next, for each square, if it's not empty, we want to extract a 32x32 normalized image centered on the piece
+	with a white background ( <code>extractPotentialPiece</code> ).
+	</p>
+	<p>
+	We extract the part of the image containing the square. If the standard deviation of pixels inside it is below
+	a treshold, we consider it empty and continue to the next square. An Otsu threshold is applied, making the image
+	pure black and white:
+	</p>
+	<br>
+	<img style="display:block;margin-left:auto;margin-right:auto;" src=pawn_before.jpg class="center">
+
+	<p>
+	To remove the diagonal lines on dark squares, we extract horizontal and vertical lines on the image using
+	morphological operations ( <code>removeDiagonalLines</code> ):
+	</p>
+	<br>
+	<img style="display:block;margin-left:auto;margin-right:auto;" src=pawn_after.jpg class="center">
+
+	<p>
+	Then, to crop around the piece, we use the findContours openCV method and calculate the smallest rectangle containing
+	every contour, discarding contours that are too close to the edge of the square ( <code>getBoundingBox</code> ).
+	Then, we add vertical or horizontal white borders to make the image square, and resize it to 32x32.
+	</p>
+
+	<h2>Classifying Pieces</h2>
+	<p>
+	The logic for this step is in <a href="https://github.com/fratajczak/ChessDiagramOCR/blob/master/src/predict.cpp">predict.cpp</a>.
+	</p>
+
+	<p>
+	We use the <a href=https://www.researchgate.net/publication/221086410_An_adaptive_k-nearest_neighbor_algorithm>adaptive k-nearest neighbor algorithm</a>
+	to classify pieces. Training data was generated with a script, using various background types and piece fonts.
+	</p>
+
+	<p>
+	The recognized board state is then returned in <a href=https://en.wikipedia.org/wiki/Forsyth%E2%80%93Edwards_Notation>Forsyth-Edwards notation</a>:
+	</p>
+	<code>
+	q1r1k2r/1b3pp1/p3pn2/P1b5/1pN1P2p/3B1P2/1P2Q1PP/R1B2R1K
+	</code>
+	<p>
+	See the board on lichess <a href=https://lichess.org/analysis/standard/q1r1k2r/1b3pp1/p3pn2/P1b5/1pN1P2p/3B1P2/1P2Q1PP/R1B2R1K>here</a>.
+	</p>
+
+</main>
